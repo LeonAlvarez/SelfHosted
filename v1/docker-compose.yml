@@ -1,0 +1,115 @@
+services:
+  db:
+    image: postgres:alpine
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - GITEA_DB_USER=${GITEA_DB_USER}
+      - GITEA_DB_PASSWORD=${GITEA_DB_PASSWORD}
+      - BITWARDEN_DB_USER=${BITWARDEN_DB_USER}
+      - BITWARDEN_DB_PASSWORD=${BITWARDEN_DB_PASSWORD}
+    ports:
+      - 5432:5432
+    volumes:
+      - "../postgres-docker-init:/docker-entrypoint-initdb.d"
+
+  traefik:
+    image: traefik:latest
+    restart: always
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.address=:80"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${LETSENCRYPT_EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+      - "--api=true"
+      - "--pilot.token=${TRAEFIK_PILOT_TOKEN}"
+      - "--api.dashboard=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.ssh.address=:2222"
+    volumes:
+      - "./letsencrypt:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    ports:
+      - "80:80"
+      - "2222:2222"
+      - "443:443"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-http.entrypoints=web"
+      - "traefik.http.routers.traefik-http.entrypoints=websecure"
+      - "traefik.http.routers.traefik-http.rule=Host(`${TRAEFIK_DOMAIN}`)"
+      - "traefik.http.routers.traefik-http.service=api@internal"
+      - "traefik.http.routers.traefik-http.tls.certresolver=myresolver"
+      - "traefik.http.routers.traefik_http.tls=true"
+      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.https-redirect.rule=hostregexp(`{host:.+}`)"
+      - "traefik.http.routers.https-redirect.entrypoints=web"
+      - "traefik.http.routers.https-redirect.middlewares=https-redirect"
+
+  git:
+    image: gitea/gitea
+    container_name: gitea
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - DB_TYPE=postgres
+      - DB_HOST=db:5432
+      - DB_NAME=${GITEA_DB_DATABASE}
+      - DB_USER=${GITEA_DB_USER}
+      - DB_PASSWD=${GITEA_DB_PASSWORD}
+      - PROTOCOL=https
+      - DOMAIN=${GITEA_DOMAIN}
+      - ROOT_URL=https://${GITEA_DOMAIN}/
+      - LOCAL_ROOT_URL=https://${GITEA_DOMAIN}/
+      - RUN_MODE=prod
+    restart: always
+    volumes:
+      - ./gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      #- "222:22"
+    depends_on:
+      - db
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitea-web.rule=Host(`${GITEA_DOMAIN}`)"
+      - "traefik.http.routers.gitea-web.entrypoints=websecure"
+      - "traefik.http.routers.gitea-web.service=gitea-web"
+      - "traefik.http.services.gitea-web.loadbalancer.server.port=3000"
+      - "traefik.http.routers.gitea-web.tls=true"
+      - "traefik.http.routers.gitea-web.tls.certresolver=myresolver"
+      - "traefik.tcp.routers.gitea-ssh.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.gitea-ssh.entrypoints=ssh"
+      - "traefik.tcp.routers.gitea-ssh.service=gitea-ssh-svc"
+      - "traefik.tcp.services.gitea-ssh-svc.loadbalancer.server.port=22"
+  bitwarden:
+    image: bitwardenrs/server:alpine
+    restart: always
+    environment:
+      - WEBSOCKET_ENABLED=true # Required to use websockets
+      - SIGNUPS_ALLOWED=true   # set to false to disable signups
+      - DATABASE_URL=postgresql://${BITWARDEN_DB_USER}:${BITWARDEN_DB_PASSWORD}@db:5432/${BITWARDEN_DB_DATABASE}
+      - ADMIN_TOKEN=${BITWARDEN_ADMIN_TOKEN}
+      - ROCKET_WORKERS=${BITWARDEN_WORKERS}
+    volumes:
+       - ./bw-data:/data
+    labels:
+       - "traefik.enable=true"
+       - "traefik.http.routers.bitwarden-ui-https.rule=Host(`${BITWARDEN_DOMAIN}`)"
+       - "traefik.http.routers.bitwarden-ui-https.entrypoints=websecure"
+       - "traefik.http.routers.bitwarden-ui-https.tls=true"
+       - "traefik.http.routers.bitwarden-ui-https.service=bitwarden-ui"
+       - "traefik.http.services.bitwarden-ui.loadbalancer.server.port=80"
+       - "traefik.http.routers.bitwarden-websocket-https.rule=Host(`${BITWARDEN_DOMAIN}`) && Path(`/notifications/hub`)"
+       - "traefik.http.routers.bitwarden-websocket-https.entrypoints=websecure"
+       - "traefik.http.routers.bitwarden-websocket-https.tls=true"
+       - "traefik.http.routers.bitwarden-websocket-https.service=bitwarden-websocket"
+       - "traefik.http.services.bitwarden-websocket.loadbalancer.server.port=3012"
+       - "traefik.http.routers.bitwarden-ui-https.tls.certresolver=myresolver"
